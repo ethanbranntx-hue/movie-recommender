@@ -85,7 +85,7 @@
 
 <script>
   // ---- Configuration ----
-  const JINA = (url) => `https://r.jina.ai/http://${url.replace(/^https?:\/\//, '')}`;
+const JINA = (url) => `https://r.jina.ai/https://${url.replace(/^https?:\/\//, '')}`;
 
   // ---- State ----
   let cachedFilms = []; // { slug, url }
@@ -140,12 +140,13 @@
   // Extract film slugs from a Letterboxd watchlist page HTML
   // Looks for /film/<slug>/ patterns.
   function parseFilmSlugs(html) {
-    const re = /href="\/film\/([^"\/]+)\/"/g;
-    const slugs = [];
-    let m;
-    while ((m = re.exec(html)) !== null) slugs.push(m[1]);
-    return slugs;
-  }
+  const re = /\/film\/([a-z0-9-]+)\//gi;
+  const slugs = [];
+  let m;
+  while ((m = re.exec(html)) !== null) slugs.push(m[1]);
+  return slugs;
+}
+
 
   // Detect pagination: Letterboxd watchlist pages often include "Next" links like /watchlist/page/2/
   function hasNextPage(html) {
