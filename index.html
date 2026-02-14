@@ -6,105 +6,190 @@
   <title>Letterboxd Watchlist Recommender</title>
   <style>
     body { font-family: -apple-system, system-ui, Arial; margin: 18px; line-height: 1.35; }
-    .card { border: 1px solid #ddd; border-radius: 14px; padding: 14px; max-width: 720px; }
-    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .card { border: 1px solid #ddd; border-radius: 16px; padding: 14px; max-width: 820px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
     input, select, button { font-size: 16px; padding: 10px 12px; border-radius: 12px; border: 1px solid #ccc; }
     button { border: 0; cursor: pointer; }
     button.primary { background: #111; color: #fff; }
     button.secondary { background: #eee; color: #111; }
+    .tabs { display:flex; gap:8px; flex-wrap:wrap; margin: 10px 0 0; }
+    .tab { padding: 8px 10px; border-radius: 999px; border: 1px solid #ccc; background:#fff; cursor:pointer; }
+    .tab.active { background:#111; color:#fff; border-color:#111; }
     small { color: #555; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     .status { margin-top: 10px; color: #333; }
     .result { margin-top: 14px; padding-top: 12px; border-top: 1px dashed #ddd; }
     a { color: #0b57d0; text-decoration: none; }
     a:hover { text-decoration: underline; }
+    .muted { color:#666; }
+    .grid { display:grid; gap:10px; grid-template-columns: 1fr; margin-top: 10px; }
+    @media (min-width: 740px) {
+      .grid { grid-template-columns: 1fr 1fr; }
+    }
+    .panel { border:1px solid #e5e5e5; border-radius:14px; padding:12px; }
+    .danger { color:#b00020; }
   </style>
 </head>
 <body>
   <div class="card">
-    <h2>Letterboxd Watchlist Recommender</h2>
-    <p>
-      Pulls from your public watchlist and recommends a movie.
-      <br><small>Uses a public read-only HTML proxy to bypass browser CORS.</small>
+    <h2>🍿 Watchlist Recommender</h2>
+    <p class="muted">
+      Pulls your Letterboxd watchlist once (cached) and uses TMDb for genres + “similar to” recommendations.
     </p>
 
     <div class="row">
       <label>
-        Username<br/>
+        Letterboxd username<br/>
         <input id="username" value="raisinbrann02" autocomplete="off" />
       </label>
 
       <label>
-        Mode<br/>
-        <select id="mode">
-          <option value="random" selected>Random</option>
-          <option value="genre">Pick by Genre</option>
+        Cache watchlist for<br/>
+        <select id="cacheHours">
+          <option value="1">1 hour</option>
+          <option value="6" selected>6 hours</option>
+          <option value="24">24 hours</option>
         </select>
       </label>
 
-      <label id="genreWrap" style="display:none;">
-        Genre<br/>
-        <select id="genre">
-          <option value="action">Action</option>
-          <option value="adventure">Adventure</option>
-          <option value="animation">Animation</option>
-          <option value="comedy">Comedy</option>
-          <option value="crime">Crime</option>
-          <option value="documentary">Documentary</option>
-          <option value="drama" selected>Drama</option>
-          <option value="family">Family</option>
-          <option value="fantasy">Fantasy</option>
-          <option value="history">History</option>
-          <option value="horror">Horror</option>
-          <option value="music">Music</option>
-          <option value="mystery">Mystery</option>
-          <option value="romance">Romance</option>
-          <option value="science-fiction">Science Fiction</option>
-          <option value="thriller">Thriller</option>
-          <option value="war">War</option>
-          <option value="western">Western</option>
-        </select>
-      </label>
+      <div style="flex:1"></div>
+
+      <button class="secondary" id="reload">Reload watchlist</button>
+      <button class="primary" id="recommend">Recommend</button>
     </div>
 
-    <div class="row" style="margin-top: 10px;">
-      <button class="primary" id="go">Recommend me one</button>
-      <button class="secondary" id="reload">Reload watchlist</button>
+    <div class="tabs" id="tabs">
+      <button class="tab active" data-tab="random">Random (watchlist)</button>
+      <button class="tab" data-tab="genre">By genre (watchlist)</button>
+      <button class="tab" data-tab="similar">Similar to… (any)</button>
+      <button class="tab" data-tab="similar_watchlist">Similar to… (on watchlist)</button>
+    </div>
+
+    <div class="grid">
+      <div class="panel" id="panel_random">
+        <b>Random from watchlist</b>
+        <p class="muted">Fast once the watchlist is cached.</p>
+      </div>
+
+      <div class="panel" id="panel_genre" style="display:none;">
+        <b>Pick by genre (from your watchlist)</b>
+        <p class="muted">Uses TMDb genre IDs. :contentReference[oaicite:4]{index=4}</p>
+        <label>
+          Genre<br/>
+          <select id="genreSelect"></select>
+        </label>
+      </div>
+
+      <div class="panel" id="panel_similar" style="display:none;">
+        <b>Similar to a movie you liked</b>
+        <p class="muted">Uses TMDb “similar” endpoint. :contentReference[oaicite:5]{index=5}</p>
+        <label>
+          Movie title<br/>
+          <input id="seedTitle" placeholder="e.g., Interstellar" />
+        </label>
+        <div class="row" style="margin-top:8px;">
+          <label>
+            Year (optional)<br/>
+            <input id="seedYear" inputmode="numeric" placeholder="e.g., 2014" style="width:140px;" />
+          </label>
+          <label>
+            How many options to sample<br/>
+            <select id="similarPool">
+              <option value="10">10</option>
+              <option value="20" selected>20</option>
+              <option value="40">40</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <div class="panel" id="panel_similar_watchlist" style="display:none;">
+        <b>Similar… but MUST be on your watchlist</b>
+        <p class="muted">Find similar movies, then filters to your watchlist.</p>
+        <label>
+          Movie title<br/>
+          <input id="seedTitle2" placeholder="e.g., Dune: Part Two" />
+        </label>
+        <div class="row" style="margin-top:8px;">
+          <label>
+            Year (optional)<br/>
+            <input id="seedYear2" inputmode="numeric" placeholder="e.g., 2024" style="width:140px;" />
+          </label>
+          <label>
+            Similar pool to scan<br/>
+            <select id="similarPool2">
+              <option value="20">20</option>
+              <option value="40" selected>40</option>
+              <option value="60">60</option>
+            </select>
+          </label>
+        </div>
+      </div>
     </div>
 
     <div class="status" id="status"></div>
-
     <div class="result" id="result" style="display:none;"></div>
 
     <p style="margin-top:12px;">
       <small>
-        Tip: If your watchlist is big, first load can take a bit because it grabs multiple pages.
+        Note: TMDb authentication can be done with an <span class="mono">api_key</span> query param or a Bearer token. :contentReference[oaicite:6]{index=6}
       </small>
     </p>
   </div>
 
 <script>
-  // ---- Configuration ----
-const JINA = (url) => `https://r.jina.ai/https://${url.replace(/^https?:\/\//, '')}`;
+  /***********************
+   * 1) CONFIG
+   ***********************/
+  // TODO: paste your TMDb v3 API key here (Settings → API on TMDb)
+  const TMDB_API_KEY = "dfd9647132166a17dd65392ce90929d2"; // <-- put it here
 
-  // ---- State ----
-  let cachedFilms = []; // { slug, url }
-  let lastUsername = "";
+  // Letterboxd fetch proxy (still used, but only to load the watchlist once, then cached)
+  const JINA = (url) => `https://r.jina.ai/https://${url.replace(/^https?:\/\//, '')}`;
 
-  // ---- UI ----
+  // Safety caps
+  const WATCHLIST_MAX_PAGES = 25;
+
+  /***********************
+   * 2) UI
+   ***********************/
   const elUser = document.getElementById("username");
-  const elMode = document.getElementById("mode");
-  const elGenreWrap = document.getElementById("genreWrap");
-  const elGenre = document.getElementById("genre");
+  const elCacheHours = document.getElementById("cacheHours");
   const elStatus = document.getElementById("status");
   const elResult = document.getElementById("result");
+  const elGenreSelect = document.getElementById("genreSelect");
+  const elSeedTitle = document.getElementById("seedTitle");
+  const elSeedYear = document.getElementById("seedYear");
+  const elSimilarPool = document.getElementById("similarPool");
+  const elSeedTitle2 = document.getElementById("seedTitle2");
+  const elSeedYear2 = document.getElementById("seedYear2");
+  const elSimilarPool2 = document.getElementById("similarPool2");
 
-  elMode.addEventListener("change", () => {
-    elGenreWrap.style.display = elMode.value === "genre" ? "block" : "none";
+  const panels = {
+    random: document.getElementById("panel_random"),
+    genre: document.getElementById("panel_genre"),
+    similar: document.getElementById("panel_similar"),
+    similar_watchlist: document.getElementById("panel_similar_watchlist"),
+  };
+
+  let activeTab = "random";
+
+  document.getElementById("tabs").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-tab]");
+    if (!btn) return;
+    activeTab = btn.dataset.tab;
+
+    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+    btn.classList.add("active");
+
+    Object.entries(panels).forEach(([k, el]) => {
+      el.style.display = (k === activeTab) ? "block" : "none";
+    });
+    hideResult();
   });
 
-  function setStatus(msg) {
-    elStatus.textContent = msg;
+  function setStatus(msg, isError=false) {
+    elStatus.innerHTML = isError ? `<span class="danger">${escapeHtml(msg)}</span>` : escapeHtml(msg);
   }
 
   function showResult(html) {
@@ -117,198 +202,386 @@ const JINA = (url) => `https://r.jina.ai/https://${url.replace(/^https?:\/\//, '
     elResult.innerHTML = "";
   }
 
-  // ---- Helpers ----
-  function uniqueBy(arr, keyFn) {
-    const seen = new Set();
-    const out = [];
-    for (const item of arr) {
-      const k = keyFn(item);
-      if (!seen.has(k)) { seen.add(k); out.push(item); }
-    }
-    return out;
-  }
-
-  function shuffle(arr) {
-    const a = arr.slice();
-    for (let i = a.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [a[i], a[j]] = [a[j], a[i]];
-    }
-    return a;
-  }
-
-  // Extract film slugs from a Letterboxd watchlist page HTML
-  // Looks for /film/<slug>/ patterns.
-  function parseFilmSlugs(html) {
-  const re = /\/film\/([a-z0-9-]+)\//gi;
-  const slugs = [];
-  let m;
-  while ((m = re.exec(html)) !== null) slugs.push(m[1]);
-  return slugs;
-}
-
-
-  // Detect pagination: Letterboxd watchlist pages often include "Next" links like /watchlist/page/2/
-  function hasNextPage(html) {
-    return /\/watchlist\/page\/\d+\/"/.test(html) && /rel="next"/.test(html);
-  }
-
-  // Fetch text HTML through Jina
-  async function fetchHtml(url) {
-    const res = await fetch(JINA(url));
-    if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
-    return await res.text();
-  }
-
-  // Load all watchlist pages (up to a safe cap)
-  async function loadWatchlist(username) {
-    hideResult();
-    setStatus("Loading watchlist…");
-
-    const films = [];
-    let page = 1;
-    const MAX_PAGES = 20; // safety cap; bump later if needed
-
-    while (page <= MAX_PAGES) {
-      const url = page === 1
-        ? `https://letterboxd.com/${username}/watchlist/`
-        : `https://letterboxd.com/${username}/watchlist/page/${page}/`;
-
-      setStatus(`Fetching page ${page}…`);
-      const html = await fetchHtml(url);
-
-      const slugs = parseFilmSlugs(html);
-      for (const slug of slugs) {
-        films.push({ slug, url: `https://letterboxd.com/film/${slug}/` });
-      }
-
-      // If no new slugs found, we're probably done
-      if (slugs.length === 0) break;
-
-      // If no clear next page link and we're past page 1, stop.
-      // (Some pages won’t show rel="next" via proxy reliably; this is still a decent cutoff.)
-      if (page > 1 && !/watchlist\/page\/\d+\//.test(html)) break;
-
-      page++;
-    }
-
-    const unique = uniqueBy(films, f => f.slug);
-    if (unique.length === 0) throw new Error("No films found. Is your watchlist public?");
-    cachedFilms = unique;
-    lastUsername = username;
-
-    setStatus(`Loaded ${cachedFilms.length} films from ${username}'s watchlist.`);
-  }
-
-  // Get film title + genres by fetching the film page
-  async function fetchFilmDetails(slug) {
-    const url = `https://letterboxd.com/film/${slug}/`;
-    const html = await fetchHtml(url);
-
-    // Title often appears in <meta property="og:title" content="TITLE…">
-    let title = slug.replace(/-/g, " ");
-    const og = html.match(/property="og:title"\s+content="([^"]+)"/);
-    if (og && og[1]) title = og[1];
-
-    // Genres: film pages include links like /films/genre/<genre>/
-    const genreRe = /href="\/films\/genre\/([^"\/]+)\/"/g;
-    const genres = new Set();
-    let m;
-    while ((m = genreRe.exec(html)) !== null) genres.add(m[1]);
-
-    return { title, url, genres: Array.from(genres) };
-  }
-
-  async function recommendRandom() {
-    if (cachedFilms.length === 0) await loadWatchlist(elUser.value.trim());
-    const pick = cachedFilms[Math.floor(Math.random() * cachedFilms.length)];
-    const details = await fetchFilmDetails(pick.slug);
-
-    showResult(`
-      <h3>${escapeHtml(details.title)}</h3>
-      <p><a href="${details.url}" target="_blank" rel="noopener">Open on Letterboxd</a></p>
-      ${details.genres.length ? `<p><small>Genres: <span class="mono">${details.genres.join(", ")}</span></small></p>` : ""}
-    `);
-  }
-
-  async function recommendByGenre(genreSlug) {
-    if (cachedFilms.length === 0) await loadWatchlist(elUser.value.trim());
-
-    setStatus(`Searching for genre: ${genreSlug}… (this may take a bit)`);
-
-    // Shuffle so results feel random
-    const pool = shuffle(cachedFilms);
-
-    // Safety cap so we don’t fetch 500 pages if nothing matches
-    const MAX_CHECKS = Math.min(60, pool.length);
-
-    for (let i = 0; i < MAX_CHECKS; i++) {
-      const film = pool[i];
-      setStatus(`Checking ${i + 1}/${MAX_CHECKS}…`);
-      try {
-        const details = await fetchFilmDetails(film.slug);
-        if (details.genres.includes(genreSlug)) {
-          setStatus(`Found a match (${genreSlug}).`);
-          showResult(`
-            <h3>${escapeHtml(details.title)}</h3>
-            <p><a href="${details.url}" target="_blank" rel="noopener">Open on Letterboxd</a></p>
-            <p><small>Genres: <span class="mono">${details.genres.join(", ")}</span></small></p>
-          `);
-          return;
-        }
-      } catch {
-        // ignore individual failures and keep going
-      }
-    }
-
-    setStatus(`No match found in the first ${MAX_CHECKS} checks. Try again or pick another genre.`);
-    showResult(`<p>No match found yet. Tap “Recommend me one” again to try more.</p>`);
-  }
-
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({
       "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
     }[c]));
   }
 
-  // ---- Buttons ----
+  function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+  /***********************
+   * 3) STORAGE + STATE
+   ***********************/
+  const cacheKey = (username) => `lb_watchlist_cache_${username.toLowerCase()}`;
+  const genreCacheKey = `tmdb_genre_map_v1`;
+
+  // watchlist items: { titleGuess, lbSlug, lbUrl }
+  let watchlist = [];
+
+  // TMDb genre map: id->name and name->id
+  let genreMap = { idToName: {}, nameToId: {} };
+
+  /***********************
+   * 4) LETTERBOXD WATCHLIST (SCRAPE ONCE, THEN CACHE)
+   ***********************/
+  async function fetchText(url) {
+    const res = await fetch(JINA(url));
+    if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
+    return await res.text();
+  }
+
+  function parseFilmSlugsFromText(htmlOrText) {
+    // Works on both HTML and proxy “text” output
+    const re = /\/film\/([a-z0-9-]+)\//gi;
+    const slugs = [];
+    let m;
+    while ((m = re.exec(htmlOrText)) !== null) slugs.push(m[1]);
+    return Array.from(new Set(slugs));
+  }
+
+  function slugToTitleGuess(slug) {
+    return slug.replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+  }
+
+  async function loadWatchlistFresh(username) {
+    hideResult();
+    setStatus("Loading watchlist…");
+
+    const items = [];
+    for (let page = 1; page <= WATCHLIST_MAX_PAGES; page++) {
+      const url = page === 1
+        ? `https://letterboxd.com/${username}/watchlist/`
+        : `https://letterboxd.com/${username}/watchlist/page/${page}/`;
+
+      setStatus(`Fetching watchlist page ${page}…`);
+      const text = await fetchText(url);
+
+      const slugs = parseFilmSlugsFromText(text);
+      if (slugs.length === 0) break;
+
+      slugs.forEach(slug => {
+        items.push({
+          lbSlug: slug,
+          lbUrl: `https://letterboxd.com/film/${slug}/`,
+          titleGuess: slugToTitleGuess(slug),
+        });
+      });
+
+      // Gentle delay to reduce proxy irritation
+      await sleep(250);
+    }
+
+    if (items.length === 0) throw new Error("No films found (but you said it’s public). Try Reload once more.");
+
+    // Cache it
+    const hours = Number(elCacheHours.value);
+    const payload = {
+      savedAt: Date.now(),
+      ttlMs: hours * 60 * 60 * 1000,
+      items
+    };
+    localStorage.setItem(cacheKey(username), JSON.stringify(payload));
+    return items;
+  }
+
+  function loadWatchlistFromCache(username) {
+    const raw = localStorage.getItem(cacheKey(username));
+    if (!raw) return null;
+    try {
+      const data = JSON.parse(raw);
+      if (!data?.savedAt || !data?.ttlMs || !Array.isArray(data?.items)) return null;
+      if (Date.now() - data.savedAt > data.ttlMs) return null;
+      return data.items;
+    } catch {
+      return null;
+    }
+  }
+
+  async function ensureWatchlist(username) {
+    const cached = loadWatchlistFromCache(username);
+    if (cached) {
+      watchlist = cached;
+      setStatus(`Loaded ${watchlist.length} watchlist films (cached).`);
+      return;
+    }
+    watchlist = await loadWatchlistFresh(username);
+    setStatus(`Loaded ${watchlist.length} watchlist films (fresh).`);
+  }
+
+  /***********************
+   * 5) TMDb HELPERS
+   ***********************/
+  function assertTmdbKey() {
+    if (!TMDB_API_KEY) {
+      throw new Error("TMDb API key missing. Paste it into TMDB_API_KEY at the top of index.html, then commit.");
+    }
+  }
+
+  async function tmdbGet(path, params = {}) {
+    assertTmdbKey();
+    const url = new URL(`https://api.themoviedb.org/3/${path}`);
+    url.searchParams.set("api_key", TMDB_API_KEY);
+    Object.entries(params).forEach(([k,v]) => {
+      if (v !== undefined && v !== null && String(v).trim() !== "") url.searchParams.set(k, v);
+    });
+
+    const res = await fetch(url.toString());
+    if (!res.ok) {
+      const txt = await res.text().catch(()=> "");
+      throw new Error(`TMDb error ${res.status}${txt ? `: ${txt.slice(0,120)}` : ""}`);
+    }
+    return await res.json();
+  }
+
+  async function loadGenreMap() {
+    // Cache genres locally so we don’t request every load
+    const raw = localStorage.getItem(genreCacheKey);
+    if (raw) {
+      try {
+        genreMap = JSON.parse(raw);
+        if (genreMap?.idToName && genreMap?.nameToId) {
+          populateGenreSelect();
+          return;
+        }
+      } catch {}
+    }
+
+    setStatus("Loading TMDb genres…");
+    const data = await tmdbGet("genre/movie/list", { language: "en-US" }); // :contentReference[oaicite:7]{index=7}
+    const idToName = {};
+    const nameToId = {};
+    (data.genres || []).forEach(g => {
+      idToName[g.id] = g.name;
+      nameToId[g.name.toLowerCase()] = g.id;
+    });
+    genreMap = { idToName, nameToId };
+    localStorage.setItem(genreCacheKey, JSON.stringify(genreMap));
+    populateGenreSelect();
+  }
+
+  function populateGenreSelect() {
+    elGenreSelect.innerHTML = "";
+    // Friendly order: alphabetical by name
+    const names = Object.values(genreMap.idToName).sort((a,b) => a.localeCompare(b));
+    names.forEach(name => {
+      const opt = document.createElement("option");
+      opt.value = String(genreMap.nameToId[name.toLowerCase()]);
+      opt.textContent = name;
+      elGenreSelect.appendChild(opt);
+    });
+  }
+
+  async function tmdbSearchMovie(title, yearOptional) {
+    const data = await tmdbGet("search/movie", { query: title, year: yearOptional || undefined, include_adult: "false", language: "en-US" });
+    const best = (data.results || [])[0];
+    if (!best) throw new Error(`No TMDb results for "${title}". Try adding the year.`);
+    return best; // has id, title, release_date, genre_ids, overview, poster_path
+  }
+
+  async function tmdbMovieDetails(movieId) {
+    // include genres directly
+    return await tmdbGet(`movie/${movieId}`, { language: "en-US" });
+  }
+
+  async function tmdbSimilar(movieId, maxCount) {
+    const data = await tmdbGet(`movie/${movieId}/similar`, { language: "en-US", page: 1 }); // :contentReference[oaicite:8]{index=8}
+    const results = data.results || [];
+    return results.slice(0, maxCount);
+  }
+
+  function tmdbPosterUrl(path) {
+    if (!path) return null;
+    // public base per TMDb conventions; fine for most apps
+    return `https://image.tmdb.org/t/p/w500${path}`;
+  }
+
+  /***********************
+   * 6) RECOMMENDATION MODES
+   ***********************/
+  function pickRandom(arr) {
+    return arr[Math.floor(Math.random() * arr.length)];
+  }
+
+  async function recommendRandomWatchlist() {
+    await ensureWatchlist(elUser.value.trim());
+    const pick = pickRandom(watchlist);
+
+    setStatus(`Picked from watchlist: ${pick.titleGuess}. Looking up on TMDb…`);
+    const tm = await tmdbSearchMovie(pick.titleGuess);
+
+    renderTmdbPick(tm, { alsoLinkLetterboxd: pick.lbUrl });
+    setStatus("Done.");
+  }
+
+  async function recommendWatchlistByGenre(genreIdStr) {
+    await ensureWatchlist(elUser.value.trim());
+    const genreId = Number(genreIdStr);
+
+    setStatus("Sampling watchlist…");
+    // We don’t want to TMDb-search every film. Instead:
+    // - sample a subset of watchlist titles
+    // - resolve each to TMDb search result
+    // - keep those with matching genre_ids
+    const shuffled = watchlist.slice().sort(() => Math.random() - 0.5);
+    const MAX_CHECKS = Math.min(35, shuffled.length);
+
+    for (let i = 0; i < MAX_CHECKS; i++) {
+      const item = shuffled[i];
+      setStatus(`Checking ${i+1}/${MAX_CHECKS} on TMDb…`);
+      try {
+        const tm = await tmdbSearchMovie(item.titleGuess);
+        if ((tm.genre_ids || []).includes(genreId)) {
+          renderTmdbPick(tm, { alsoLinkLetterboxd: item.lbUrl });
+          setStatus("Done.");
+          return;
+        }
+        // tiny delay to be polite to TMDb
+        await sleep(120);
+      } catch {
+        // ignore and continue
+      }
+    }
+
+    const gName = genreMap.idToName[genreId] || "that genre";
+    throw new Error(`Couldn’t find a ${gName} match in the first ${MAX_CHECKS} watchlist checks. Tap Recommend again to try a different sample.`);
+  }
+
+  async function recommendSimilarAny(seedTitle, seedYear, poolSize) {
+    setStatus("Searching seed movie on TMDb…");
+    const seed = await tmdbSearchMovie(seedTitle, seedYear);
+    setStatus(`Found seed: ${seed.title}. Getting similar…`);
+    const similars = await tmdbSimilar(seed.id, Number(poolSize));
+
+    if (similars.length === 0) throw new Error("TMDb returned no similar movies for that title.");
+
+    const pick = pickRandom(similars);
+    renderTmdbPick(pick, { seed });
+    setStatus("Done.");
+  }
+
+  async function recommendSimilarOnWatchlist(seedTitle, seedYear, poolSize) {
+    await ensureWatchlist(elUser.value.trim());
+
+    setStatus("Searching seed movie on TMDb…");
+    const seed = await tmdbSearchMovie(seedTitle, seedYear);
+
+    setStatus(`Getting similar movies to ${seed.title}…`);
+    const similars = await tmdbSimilar(seed.id, Number(poolSize));
+
+    if (similars.length === 0) throw new Error("TMDb returned no similar movies for that title.");
+
+    // Build a quick lookup from watchlist title guesses (lowercased)
+    const wlSet = new Set(watchlist.map(x => x.titleGuess.toLowerCase()));
+
+    // Find any similar whose title matches a watchlist guess
+    const matches = similars.filter(s => wlSet.has(String(s.title || "").toLowerCase()));
+
+    if (matches.length === 0) {
+      throw new Error("None of the similar movies (in that pool) were detected on your watchlist. Increase pool size or try a different seed movie.");
+    }
+
+    const pick = pickRandom(matches);
+    // Attach Letterboxd link if we can find it
+    const wlItem = watchlist.find(x => x.titleGuess.toLowerCase() === String(pick.title || "").toLowerCase());
+    renderTmdbPick(pick, { seed, alsoLinkLetterboxd: wlItem?.lbUrl });
+    setStatus("Done.");
+  }
+
+  function renderTmdbPick(tm, opts = {}) {
+    const poster = tmdbPosterUrl(tm.poster_path);
+    const year = (tm.release_date || "").slice(0,4);
+    const genres = (tm.genre_ids || [])
+      .map(id => genreMap.idToName[id])
+      .filter(Boolean);
+
+    const seedLine = opts.seed
+      ? `<p class="muted"><small>Similar to: <span class="mono">${escapeHtml(opts.seed.title)} (${(opts.seed.release_date||"").slice(0,4)})</span></small></p>`
+      : "";
+
+    const lbLink = opts.alsoLinkLetterboxd
+      ? `<p><a href="${opts.alsoLinkLetterboxd}" target="_blank" rel="noopener">Open on Letterboxd</a></p>`
+      : "";
+
+    const tmdbLink = tm.id
+      ? `https://www.themoviedb.org/movie/${tm.id}`
+      : null;
+
+    showResult(`
+      ${seedLine}
+      <div style="display:flex; gap:12px; align-items:flex-start; flex-wrap:wrap;">
+        ${poster ? `<img src="${poster}" alt="" style="width:120px; border-radius:12px; border:1px solid #eee;">` : ""}
+        <div style="min-width:240px; flex:1;">
+          <h3 style="margin:0 0 6px;">${escapeHtml(tm.title || "Untitled")}${year ? ` <span class="muted">(${escapeHtml(year)})</span>` : ""}</h3>
+          ${genres.length ? `<p><small>Genres: <span class="mono">${escapeHtml(genres.join(", "))}</span></small></p>` : ""}
+          ${tm.overview ? `<p style="margin:8px 0;">${escapeHtml(tm.overview)}</p>` : ""}
+          ${tmdbLink ? `<p><a href="${tmdbLink}" target="_blank" rel="noopener">Open on TMDb</a></p>` : ""}
+          ${lbLink}
+        </div>
+      </div>
+    `);
+  }
+
+  /***********************
+   * 7) WIRE BUTTONS
+   ***********************/
   document.getElementById("reload").addEventListener("click", async () => {
     try {
       const u = elUser.value.trim();
-      if (!u) return setStatus("Enter a username.");
-      await loadWatchlist(u);
+      if (!u) return setStatus("Enter a username.", true);
+      localStorage.removeItem(cacheKey(u));
+      setStatus("Cache cleared. Reloading…");
+      await ensureWatchlist(u);
+      setStatus(`Loaded ${watchlist.length} watchlist films (fresh).`);
     } catch (e) {
-      setStatus(`Error: ${e.message}`);
+      setStatus(`Error: ${e.message}`, true);
     }
   });
 
-  document.getElementById("go").addEventListener("click", async () => {
+  document.getElementById("recommend").addEventListener("click", async () => {
     try {
+      hideResult();
       const u = elUser.value.trim();
-      if (!u) return setStatus("Enter a username.");
+      if (!u) return setStatus("Enter a username.", true);
 
-      // Reload if username changed
-      if (u !== lastUsername) await loadWatchlist(u);
+      // Genre list is needed for genre labels and better UI in all modes
+      await loadGenreMap();
 
-      if (elMode.value === "random") {
-        setStatus("Picking a movie…");
-        await recommendRandom();
-        setStatus("Done.");
-      } else {
-        hideResult();
-        await recommendByGenre(elGenre.value);
+      if (activeTab === "random") {
+        await recommendRandomWatchlist();
+      } else if (activeTab === "genre") {
+        await recommendWatchlistByGenre(elGenreSelect.value);
+      } else if (activeTab === "similar") {
+        const t = elSeedTitle.value.trim();
+        if (!t) throw new Error("Enter a movie title you liked.");
+        await recommendSimilarAny(t, elSeedYear.value.trim(), elSimilarPool.value);
+      } else if (activeTab === "similar_watchlist") {
+        const t = elSeedTitle2.value.trim();
+        if (!t) throw new Error("Enter a movie title you liked.");
+        await recommendSimilarOnWatchlist(t, elSeedYear2.value.trim(), elSimilarPool2.value);
       }
     } catch (e) {
-      setStatus(`Error: ${e.message}`);
+      setStatus(`Error: ${e.message}`, true);
     }
   });
 
-  // Auto-load on first open
+  /***********************
+   * 8) INITIAL LOAD
+   ***********************/
   (async () => {
     try {
-      await loadWatchlist(elUser.value.trim());
+      setStatus("Ready. Add your TMDb key, then hit Recommend.");
+      // Pre-load cached watchlist if it exists so it feels instant
+      const u = elUser.value.trim();
+      const cached = loadWatchlistFromCache(u);
+      if (cached) {
+        watchlist = cached;
+        setStatus(`Loaded ${watchlist.length} watchlist films (cached). Add TMDb key, then Recommend.`);
+      }
+      // Load genres only when TMDb key exists (otherwise we'd error immediately)
+      if (TMDB_API_KEY) await loadGenreMap();
     } catch (e) {
-      setStatus(`Error: ${e.message}`);
+      setStatus(`Error: ${e.message}`, true);
     }
   })();
 </script>
