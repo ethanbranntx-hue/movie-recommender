@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Letterboxd Watchlist Recommender</title>
+  <style>
+    body { font-family: -apple-system, system-ui, Arial; margin: 18px; line-height: 1.35; }
+    .card { border: 1px solid #ddd; border-radius: 14px; padding: 14px; max-width: 720px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    input, select, button { font-size: 16px; padding: 10px 12px; border-radius: 12px; border: 1px solid #ccc; }
+    button { border: 0; cursor: pointer; }
+    button.primary { background: #111; color: #fff; }
+    button.secondary { background: #eee; color: #111; }
+    small { color: #555; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .status { margin-top: 10px; color: #333; }
+    .result { margin-top: 14px; padding-top: 12px; border-top: 1px dashed #ddd; }
+    a { color: #0b57d0; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Letterboxd Watchlist Recommender</h2>
+    <p>
+      Pulls from your public watchlist and recommends a movie.
+      <br><small>Uses a public read-only HTML proxy to bypass browser CORS.</small>
+    </p>
+
+    <div class="row">
+      <label>
+        Username<br/>
+        <input id="username" value="raisinbrann02" autocomplete="off" />
+      </label>
+
+      <label>
+        Mode<br/>
+        <select id="mode">
+          <option value="random" selected>Random</option>
+          <option value="genre">Pick by Genre</option>
+        </select>
+      </label>
+
+      <label id="genreWrap" style="display:none;">
+        Genre<br/>
+        <select id="genre">
+          <option value="action">Action</option>
+          <option value="adventure">Adventure</option>
+          <option value="animation">Animation</option>
+          <option value="comedy">Comedy</option>
+          <option value="crime">Crime</option>
+          <option value="documentary">Documentary</option>
+          <option value="drama" selected>Drama</option>
+          <option value="family">Family</option>
+          <option value="fantasy">Fantasy</option>
+          <option value="history">History</option>
+          <option value="horror">Horror</option>
+          <option value="music">Music</option>
+          <option value="mystery">Mystery</option>
+          <option value="romance">Romance</option>
+          <option value="science-fiction">Science Fiction</option>
+          <option value="thriller">Thriller</option>
+          <option value="war">War</option>
+          <option value="western">Western</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="row" style="margin-top: 10px;">
+      <button class="primary" id="go">Recommend me one</button>
+      <button class="secondary" id="reload">Reload watchlist</button>
+    </div>
+
+    <div class="status" id="status"></div>
+
+    <div class="result" id="result" style="display:none;"></div>
+
+    <p style="margin-top:12px;">
+      <small>
+        Tip: If your watchlist is big, first load can take a bit because it grabs multiple pages.
+      </small>
+    </p>
+  </div>
+
+<script>
+  // ---- Configuration ----
+  const JINA = (url) => `https://r.jina.ai/http://${url.replace(/^https?:\/\//, '')}`;
+
+  // ---- State ----
+  let cachedFilms = []; // { slug, url }
+  let lastUsername = "";
+
+  // ---- UI ----
+  const elUser = document.getElementById("username");
+  const elMode = document.getElementById("mode");
+  const elGenreWrap = document.getElementById("genreWrap");
+  const elGenre = document.getElementById("genre");
+  const elStatus = document.getElementById("status");
+  const elResult = document.getElementById("result");
+
+  elMode.addEventListener("change", () => {
+    elGenreWrap.style.display = elMode.value === "genre" ? "block" : "none";
+  });
+
+  function setStatus(msg) {
+    elStatus.textContent = msg;
+  }
+
+  function showResult(html) {
+    elResult.style.display = "block";
+    elResult.innerHTML = html;
+  }
+
+  function hideResult() {
+    elResult.style.display = "none";
+    elResult.innerHTML = "";
+  }
+
+  // ---- Helpers ----
+  function uniqueBy(arr, keyFn) {
+    const seen = new Set();
+    const out = [];
+    for (const item of arr) {
+      const k = keyFn(item);
+      if (!seen.has(k)) { seen.add(k); out.push(item); }
+    }
+    return out;
+  }
+
+  function shuffle(arr) {
+    const a = arr.slice();
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+
+  // Extract film slugs from a Letterboxd watchlist page HTML
+  // Looks for /film/<slug>/ patterns.
+  function parseFilmSlugs(html) {
+    const re = /href="\/film\/([^"\/]+)\/"/g;
+    const slugs = [];
+    let m;
+    while ((m = re.exec(html)) !== null) slugs.push(m[1]);
+    return slugs;
+  }
+
+  // Detect pagination: Letterboxd watchlist pages often include "Next" links like /watchlist/page/2/
+  function hasNextPage(html) {
+    return /\/watchlist\/page\/\d+\/"/.test(html) && /rel="next"/.test(html);
+  }
+
+  // Fetch text HTML through Jina
+  async function fetchHtml(url) {
+    const res = await fetch(JINA(url));
+    if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
+    return await res.text();
+  }
+
+  // Load all watchlist pages (up to a safe cap)
+  async function loadWatchlist(username) {
+    hideResult();
+    setStatus("Loading watchlist…");
+
+    const films = [];
+    let page = 1;
+    const MAX_PAGES = 20; // safety cap; bump later if needed
+
+    while (page <= MAX_PAGES) {
+      const url = page === 1
+        ? `https://letterboxd.com/${username}/watchlist/`
+        : `https://letterboxd.com/${username}/watchlist/page/${page}/`;
+
+      setStatus(`Fetching page ${page}…`);
+      const html = await fetchHtml(url);
+
+      const slugs = parseFilmSlugs(html);
+      for (const slug of slugs) {
+        films.push({ slug, url: `https://letterboxd.com/film/${slug}/` });
+      }
+
+      // If no new slugs found, we're probably done
+      if (slugs.length === 0) break;
+
+      // If no clear next page link and we're past page 1, stop.
+      // (Some pages won’t show rel="next" via proxy reliably; this is still a decent cutoff.)
+      if (page > 1 && !/watchlist\/page\/\d+\//.test(html)) break;
+
+      page++;
+    }
+
+    const unique = uniqueBy(films, f => f.slug);
+    if (unique.length === 0) throw new Error("No films found. Is your watchlist public?");
+    cachedFilms = unique;
+    lastUsername = username;
+
+    setStatus(`Loaded ${cachedFilms.length} films from ${username}'s watchlist.`);
+  }
+
+  // Get film title + genres by fetching the film page
+  async function fetchFilmDetails(slug) {
+    const url = `https://letterboxd.com/film/${slug}/`;
+    const html = await fetchHtml(url);
+
+    // Title often appears in <meta property="og:title" content="TITLE…">
+    let title = slug.replace(/-/g, " ");
+    const og = html.match(/property="og:title"\s+content="([^"]+)"/);
+    if (og && og[1]) title = og[1];
+
+    // Genres: film pages include links like /films/genre/<genre>/
+    const genreRe = /href="\/films\/genre\/([^"\/]+)\/"/g;
+    const genres = new Set();
+    let m;
+    while ((m = genreRe.exec(html)) !== null) genres.add(m[1]);
+
+    return { title, url, genres: Array.from(genres) };
+  }
+
+  async function recommendRandom() {
+    if (cachedFilms.length === 0) await loadWatchlist(elUser.value.trim());
+    const pick = cachedFilms[Math.floor(Math.random() * cachedFilms.length)];
+    const details = await fetchFilmDetails(pick.slug);
+
+    showResult(`
+      <h3>${escapeHtml(details.title)}</h3>
+      <p><a href="${details.url}" target="_blank" rel="noopener">Open on Letterboxd</a></p>
+      ${details.genres.length ? `<p><small>Genres: <span class="mono">${details.genres.join(", ")}</span></small></p>` : ""}
+    `);
+  }
+
+  async function recommendByGenre(genreSlug) {
+    if (cachedFilms.length === 0) await loadWatchlist(elUser.value.trim());
+
+    setStatus(`Searching for genre: ${genreSlug}… (this may take a bit)`);
+
+    // Shuffle so results feel random
+    const pool = shuffle(cachedFilms);
+
+    // Safety cap so we don’t fetch 500 pages if nothing matches
+    const MAX_CHECKS = Math.min(60, pool.length);
+
+    for (let i = 0; i < MAX_CHECKS; i++) {
+      const film = pool[i];
+      setStatus(`Checking ${i + 1}/${MAX_CHECKS}…`);
+      try {
+        const details = await fetchFilmDetails(film.slug);
+        if (details.genres.includes(genreSlug)) {
+          setStatus(`Found a match (${genreSlug}).`);
+          showResult(`
+            <h3>${escapeHtml(details.title)}</h3>
+            <p><a href="${details.url}" target="_blank" rel="noopener">Open on Letterboxd</a></p>
+            <p><small>Genres: <span class="mono">${details.genres.join(", ")}</span></small></p>
+          `);
+          return;
+        }
+      } catch {
+        // ignore individual failures and keep going
+      }
+    }
+
+    setStatus(`No match found in the first ${MAX_CHECKS} checks. Try again or pick another genre.`);
+    showResult(`<p>No match found yet. Tap “Recommend me one” again to try more.</p>`);
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+    }[c]));
+  }
+
+  // ---- Buttons ----
+  document.getElementById("reload").addEventListener("click", async () => {
+    try {
+      const u = elUser.value.trim();
+      if (!u) return setStatus("Enter a username.");
+      await loadWatchlist(u);
+    } catch (e) {
+      setStatus(`Error: ${e.message}`);
+    }
+  });
+
+  document.getElementById("go").addEventListener("click", async () => {
+    try {
+      const u = elUser.value.trim();
+      if (!u) return setStatus("Enter a username.");
+
+      // Reload if username changed
+      if (u !== lastUsername) await loadWatchlist(u);
+
+      if (elMode.value === "random") {
+        setStatus("Picking a movie…");
+        await recommendRandom();
+        setStatus("Done.");
+      } else {
+        hideResult();
+        await recommendByGenre(elGenre.value);
+      }
+    } catch (e) {
+      setStatus(`Error: ${e.message}`);
+    }
+  });
+
+  // Auto-load on first open
+  (async () => {
+    try {
+      await loadWatchlist(elUser.value.trim());
+    } catch (e) {
+      setStatus(`Error: ${e.message}`);
+    }
+  })();
+</script>
+</body>
+</html>
