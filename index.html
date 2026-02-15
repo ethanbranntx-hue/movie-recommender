@@ -219,9 +219,10 @@ function renderPick(tm, opts = {}) {
   const poster = tm.poster_path ? `https://image.tmdb.org/t/p/w500${tm.poster_path}` : "";
   const genres = (tm.genre_ids || []).map(id => genreMap.idToName[id]).filter(Boolean);
   
-  showResult(`
+  // Create the main result HTML
+  let html = `
     ${opts.seed ? `<p class="muted"><small>Because you liked: <b>${escapeHtml(opts.seed.title)}</b></small></p>` : ""}
-    <div style="display:flex; gap:15px; flex-wrap:wrap;">
+    <div style="display:flex; gap:15px; flex-wrap:wrap; margin-bottom: 20px;">
       ${poster ? `<img src="${poster}" style="width:140px; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1);">` : ""}
       <div style="flex:1; min-width:260px;">
         <h3 style="margin:0;">${escapeHtml(tm.title)} <span class="muted">(${(tm.release_date||"").slice(0,4)})</span></h3>
@@ -231,7 +232,31 @@ function renderPick(tm, opts = {}) {
         ${opts.lbUrl ? ` | <a href="${opts.lbUrl}" target="_blank">View on Letterboxd</a>` : ""}
       </div>
     </div>
-  `);
+  `;
+
+  // If there are extra options, append them underneath
+  if (opts.others && opts.others.length > 0) {
+    html += `<div style="border-top: 1px solid #eee; padding-top: 15px;">
+              <b class="muted" style="font-size: 13px; text-transform: uppercase;">Other Options</b>
+              <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; margin-top: 10px;">`;
+    
+    opts.others.forEach(movie => {
+      const sPoster = movie.tm.poster_path ? `https://image.tmdb.org/t/p/w200${movie.tm.poster_path}` : "";
+      html += `
+        <div style="display: flex; gap: 10px; align-items: center; background: #fff; padding: 8px; border-radius: 8px; border: 1px solid #eee;">
+          ${sPoster ? `<img src="${sPoster}" style="width: 50px; border-radius: 4px;">` : ""}
+          <div style="font-size: 13px;">
+            <div style="font-weight: bold; line-height: 1.2;">${escapeHtml(movie.tm.title)}</div>
+            <div class="muted">${(movie.tm.release_date||"").slice(0,4)}</div>
+            <a href="https://www.themoviedb.org/movie/${movie.tm.id}" target="_blank" style="font-size: 11px;">TMDb</a>
+          </div>
+        </div>
+      `;
+    });
+    html += `</div></div>`;
+  }
+
+  showResult(html);
 }
 
 elRecommendBtn.addEventListener("click", async () => {
@@ -243,26 +268,38 @@ elRecommendBtn.addEventListener("click", async () => {
     if (elApiKey.value) localStorage.setItem(TMDB_KEY_CACHE_KEY, elApiKey.value.trim());
     if (!Object.keys(genreMap.idToName).length) await loadGenreMap();
 
+// 1. RANDOM PICK LOGIC
     if (activeTab === "random") {
       if (!watchlist.length) throw new Error("Upload watchlist first.");
-      const pick = pickRandom(watchlist);
-      const s = await tmdbGet("search/movie", { query: pick.titleGuess, year: pick.yearGuess });
-      renderPick(s.results[0], { lbUrl: pick.lbUrl });
+      const picks = [];
+      for(let i=0; i<4; i++) picks.push(pickRandom(watchlist));
+      
+      const results = await Promise.all(picks.map(p => tmdbGet("search/movie", { query: p.titleGuess, year: p.yearGuess })));
+      const valid = results.map((s, i) => ({ tm: s.results[0], lbUrl: picks[i].lbUrl })).filter(r => r.tm);
+
+      renderPick(valid[0].tm, { lbUrl: valid[0].lbUrl, others: valid.slice(1) });
     } 
+
+    // 2. GENRE FILTER LOGIC
     else if (activeTab === "genre") {
       const gid = Number(elGenreSelect.value);
       const shuffled = [...watchlist].sort(() => 0.5 - Math.random());
-      for (let i = 0; i < Math.min(50, shuffled.length); i++) {
-        setStatus(`Scanning: ${shuffled[i].titleGuess}...`);
+      const matches = [];
+      
+      for (let i = 0; i < shuffled.length && matches.length < 4; i++) {
+        setStatus(`Searching watchlist... Found ${matches.length}/4 matches`);
         const s = await tmdbGet("search/movie", { query: shuffled[i].titleGuess, year: shuffled[i].yearGuess });
         if (s.results[0]?.genre_ids.includes(gid)) {
-          renderPick(s.results[0], { lbUrl: shuffled[i].lbUrl });
-          setStatus("Match found!"); return;
+          matches.push({ tm: s.results[0], lbUrl: shuffled[i].lbUrl });
         }
         await sleep(150);
       }
-      throw new Error("No match found in this sample.");
+      
+      if (!matches.length) throw new Error("No match found in this sample.");
+      renderPick(matches[0].tm, { lbUrl: matches[0].lbUrl, others: matches.slice(1) });
     }
+
+    // 3. SIMILAR MOVIE LOGIC
     else if (activeTab.startsWith("similar")) {
       const isWatchlist = activeTab === "similar_watchlist";
       const titleInput = isWatchlist ? "seedTitle2" : "seedTitle";
@@ -271,20 +308,21 @@ elRecommendBtn.addEventListener("click", async () => {
 
       const seedSearch = await tmdbGet("search/movie", { query: title });
       const seed = seedSearch.results[0];
-      if (!seed) throw new Error("Seed movie not found.");
-      
       const similarData = await tmdbGet(`movie/${seed.id}/similar`);
       const similars = similarData.results;
 
       if (isWatchlist) {
         const wlMap = new Map(watchlist.map(w => [normalizeTitle(w.titleGuess), w]));
-        const matches = similars.filter(s => wlMap.has(normalizeTitle(s.title)));
-        if (!matches.length) throw new Error("No similar movies found on your watchlist.");
-        const pick = pickRandom(matches);
-        renderPick(pick, { seed, lbUrl: wlMap.get(normalizeTitle(pick.title)).lbUrl });
+        const matches = similars.filter(s => wlMap.has(normalizeTitle(s.title)))
+                                .map(s => ({ tm: s, lbUrl: wlMap.get(normalizeTitle(s.title)).lbUrl }));
+        
+        if (!matches.length) throw new Error("No similar movies found on watchlist.");
+        renderPick(matches[0].tm, { seed, lbUrl: matches[0].lbUrl, others: matches.slice(1, 4) });
       } else {
-        renderPick(pickRandom(similars), { seed });
+        const formatted = similars.slice(0, 4).map(s => ({ tm: s }));
+        renderPick(formatted[0].tm, { seed, others: formatted.slice(1) });
       }
+    }
     }
     setStatus("Done.");
   } catch (e) { setStatus(e.message, true); }
