@@ -28,6 +28,7 @@
     .panel { border:1px solid #e5e5e5; border-radius:14px; padding:15px; background: #fafafa; }
     .danger { color:#b00020; font-weight: bold; }
     .pill { display:inline-block; padding: 4px 12px; border-radius: 999px; border: 1px solid #ddd; margin: 4px 6px 0 0; font-size: 12px; background: #fff; }
+    .hint { font-size: 13px; margin-top: 10px; }
   </style>
 </head>
 <body>
@@ -70,20 +71,21 @@
         <b>Filter by Genre</b>
         <p class="muted">Samples your list to find a specific genre match.</p>
         <label>Genre<br/><select id="genreSelect" style="width:100%"></select></label>
+        <p class="hint muted">Tip: if it can’t find a match, click Recommend again (it re-samples).</p>
       </div>
 
       <div class="panel" id="panel_similar_any" style="display:none;">
         <b>Similar to... (Global)</b>
         <p class="muted">Finds a movie similar to your "seed" from all of TMDb.</p>
         <input id="seedTitle" placeholder="Movie title (e.g. Inception)" style="width:100%; margin-bottom:8px;"/>
-        <input id="seedYear" placeholder="Year (optional)" style="width:100%"/>
+        <input id="seedYear" placeholder="Year (optional)" inputmode="numeric" style="width:100%"/>
       </div>
 
       <div class="panel" id="panel_similar_watchlist" style="display:none;">
         <b>Similar to... (Watchlist)</b>
         <p class="muted">Finds a movie similar to your "seed" that is <b>already</b> on your watchlist.</p>
         <input id="seedTitle2" placeholder="Movie title" style="width:100%; margin-bottom:8px;"/>
-        <input id="seedYear2" placeholder="Year (optional)" style="width:100%"/>
+        <input id="seedYear2" placeholder="Year (optional)" inputmode="numeric" style="width:100%"/>
       </div>
     </div>
 
@@ -95,14 +97,17 @@
 /***********************
  * STATE & CONSTANTS
  ***********************/
-const WATCHLIST_CACHE_KEY = "lb_watchlist_csv_cache_v3";
-const TMDB_KEY_CACHE_KEY = "tmdb_key_cache_v2";
-const GENRE_CACHE_KEY = "tmdb_genres_cache_v2";
+const WATCHLIST_CACHE_KEY = "lb_watchlist_csv_cache_v4";
+const TMDB_KEY_CACHE_KEY  = "tmdb_key_cache_v3";
+const GENRE_CACHE_KEY     = "tmdb_genres_cache_v3";
 
 let watchlist = [];
 let genreMap = { idToName: {}, nameToId: {} };
 let activeTab = "random";
 
+/***********************
+ * DOM
+ ***********************/
 const elApiKey = document.getElementById("apiKey");
 const elCsvFile = document.getElementById("csvFile");
 const elClearCache = document.getElementById("clearCache");
@@ -121,230 +126,429 @@ const panels = {
 /***********************
  * UTILS
  ***********************/
-const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
-const setStatus = (msg, isError=false) => elStatus.innerHTML = isError ? `<span class="danger">${msg}</span>` : msg;
-const showResult = (html) => { elResult.style.display = "block"; elResult.innerHTML = html; };
-const hideResult = () => { elResult.style.display = "none"; elResult.innerHTML = ""; };
-const pickRandom = (arr) => arr[Math.floor(Math.random() * arr.length)];
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[c]));
+}
+
+function setStatus(msg, isError=false) {
+  const safe = escapeHtml(msg);
+  elStatus.innerHTML = isError ? `<span class="danger">${safe}</span>` : safe;
+}
+
+function showResult(html) {
+  elResult.style.display = "block";
+  elResult.innerHTML = html;
+}
+
+function hideResult() {
+  elResult.style.display = "none";
+  elResult.innerHTML = "";
+}
+
+function pickRandom(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
 
 function normalizeTitle(s) {
   return String(s || "").toLowerCase()
     .replace(/[’']/g, "")
     .replace(/&/g, " and ")
     .replace(/[^a-z0-9 ]/g, " ")
-    .replace(/\s+/g, " ").trim();
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function ensureWatchlistLoaded() {
+  if (!Array.isArray(watchlist) || watchlist.length === 0) {
+    throw new Error("Upload watchlist.csv first.");
+  }
 }
 
 /***********************
- * TMDB API CORE
+ * TMDb API
  ***********************/
+function getTmdbKey() {
+  const typed = elApiKey.value.trim();
+  if (typed) return typed;
+
+  const cached = (localStorage.getItem(TMDB_KEY_CACHE_KEY) || "").trim();
+  if (cached) return cached;
+
+  return "";
+}
+
+function requireTmdbKey() {
+  const k = getTmdbKey();
+  if (!k) throw new Error("Please enter a TMDb API Key.");
+  return k;
+}
+
 async function tmdbGet(path, params = {}) {
-  const key = elApiKey.value.trim() || localStorage.getItem(TMDB_KEY_CACHE_KEY);
-  if (!key) throw new Error("Please enter a TMDb API Key.");
-  
+  const key = requireTmdbKey();
+
   const url = new URL(`https://api.themoviedb.org/3/${path}`);
   url.searchParams.set("api_key", key);
-  Object.entries(params).forEach(([k, v]) => { if(v) url.searchParams.set(k, v); });
 
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`TMDb API Error: ${res.status}`);
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && String(v).trim() !== "") {
+      url.searchParams.set(k, v);
+    }
+  }
+
+  const res = await fetch(url.toString());
+  if (!res.ok) {
+    let txt = "";
+    try { txt = await res.text(); } catch {}
+    throw new Error(`TMDb API Error: ${res.status}${txt ? ` (${txt.slice(0, 120)})` : ""}`);
+  }
   return res.json();
 }
 
-async function loadGenreMap() {
-  try {
-    const data = await tmdbGet("genre/movie/list");
-    genreMap.idToName = {};
-    data.genres.forEach(g => {
-      genreMap.idToName[g.id] = g.name;
-      genreMap.nameToId[g.name.toLowerCase()] = g.id;
-    });
-    localStorage.setItem(GENRE_CACHE_KEY, JSON.stringify(genreMap));
-    elGenreSelect.innerHTML = Object.values(genreMap.idToName).sort().map(name => 
-      `<option value="${genreMap.nameToId[name.toLowerCase()]}">${name}</option>`).join("");
-  } catch (e) { console.error("Genre load failed", e); }
+async function tmdbSearchMovie(title, yearOptional) {
+  const data = await tmdbGet("search/movie", {
+    query: title,
+    year: yearOptional || undefined,
+    include_adult: "false",
+    language: "en-US"
+  });
+  const best = data.results?.[0];
+  if (!best) throw new Error(`No TMDb result for "${title}". Try adding the year.`);
+  return best;
+}
+
+async function tmdbSimilar(movieId) {
+  const data = await tmdbGet(`movie/${movieId}/similar`, {
+    language: "en-US",
+    page: 1
+  });
+  return data.results || [];
 }
 
 /***********************
- * CSV & STORAGE
+ * GENRES (cache-first)
+ ***********************/
+async function loadGenreMap() {
+  // cache-first
+  const cached = localStorage.getItem(GENRE_CACHE_KEY);
+  if (cached) {
+    try {
+      const parsed = JSON.parse(cached);
+      if (parsed?.idToName && parsed?.nameToId) {
+        genreMap = parsed;
+        populateGenreSelect();
+        return;
+      }
+    } catch {}
+  }
+
+  setStatus("Loading TMDb genres…");
+  const data = await tmdbGet("genre/movie/list", { language: "en-US" });
+
+  const idToName = {};
+  const nameToId = {};
+  (data.genres || []).forEach(g => {
+    idToName[g.id] = g.name;
+    nameToId[String(g.name).toLowerCase()] = g.id;
+  });
+
+  genreMap = { idToName, nameToId };
+  localStorage.setItem(GENRE_CACHE_KEY, JSON.stringify(genreMap));
+  populateGenreSelect();
+}
+
+function populateGenreSelect() {
+  const names = Object.values(genreMap.idToName)
+    .sort((a,b) => a.localeCompare(b));
+
+  elGenreSelect.innerHTML = names.map(name => {
+    const id = genreMap.nameToId[String(name).toLowerCase()];
+    return `<option value="${id}">${escapeHtml(name)}</option>`;
+  }).join("");
+}
+
+/***********************
+ * CSV PARSING
  ***********************/
 function parseCSV(text) {
-  const rows = []; let row = []; let cur = ""; let inQuotes = false;
+  const rows = [];
+  let row = [];
+  let cur = "";
+  let inQuotes = false;
+
   for (let i = 0; i < text.length; i++) {
-    const c = text[i]; const next = text[i+1];
+    const c = text[i];
+    const next = text[i+1];
+
     if (c === '"' && next === '"') { cur += '"'; i++; continue; }
     if (c === '"') { inQuotes = !inQuotes; continue; }
+
     if (!inQuotes && c === ",") { row.push(cur); cur = ""; continue; }
+
     if (!inQuotes && (c === "\n" || c === "\r")) {
       if (c === "\r" && next === "\n") i++;
       row.push(cur); cur = "";
-      if (row.some(cell => cell.trim() !== "")) rows.push(row);
-      row = []; continue;
+      if (row.some(cell => String(cell).trim() !== "")) rows.push(row);
+      row = [];
+      continue;
     }
+
     cur += c;
   }
-  if (cur || row.length) { row.push(cur); if (row.some(c => c.trim() !== "")) rows.push(row); }
+
+  if (cur.length || row.length) {
+    row.push(cur);
+    if (row.some(cell => String(cell).trim() !== "")) rows.push(row);
+  }
+
   return rows;
 }
 
+function watchlistFromCSV(csvText) {
+  const rows = parseCSV(csvText);
+  if (rows.length < 2) throw new Error("CSV looks empty.");
+
+  const headers = rows[0].map(h => String(h).trim().toLowerCase());
+  const idxName = headers.indexOf("name");
+  const idxYear = headers.indexOf("year");
+  const idxUri  = headers.findIndex(h => h.includes("letterboxd uri") || (h.includes("uri") && h.includes("letterboxd")));
+
+  if (idxName === -1) throw new Error("Couldn’t find a 'Name' column. Make sure you uploaded Letterboxd watchlist.csv.");
+
+  const items = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i] || [];
+    const name = String(r[idxName] || "").trim();
+    if (!name) continue;
+
+    const year = idxYear !== -1 ? String(r[idxYear] || "").trim() : "";
+    const lbUrl = idxUri !== -1 ? String(r[idxUri] || "").trim() : "";
+
+    items.push({
+      titleGuess: name,
+      yearGuess: year,
+      lbUrl: lbUrl || null
+    });
+  }
+
+  if (!items.length) throw new Error("No movies parsed from CSV.");
+  return items;
+}
+
+/***********************
+ * EVENTS: CSV & CACHE
+ ***********************/
 elCsvFile.addEventListener("change", async () => {
   try {
-    const file = elCsvFile.files[0];
+    const file = elCsvFile.files?.[0];
+    if (!file) return;
+
+    setStatus("Reading CSV…");
     const text = await file.text();
-    const rows = parseCSV(text);
-    const headers = rows[0].map(h => h.trim().toLowerCase());
-    const idxName = headers.indexOf("name"), idxYear = headers.indexOf("year"), idxUri = headers.findIndex(h => h.includes("uri"));
+    watchlist = watchlistFromCSV(text);
 
-    watchlist = rows.slice(1).map(r => ({
-      titleGuess: r[idxName],
-      yearGuess: idxYear !== -1 ? r[idxYear] : "",
-      lbUrl: idxUri !== -1 ? r[idxUri] : null
-    })).filter(x => x.titleGuess);
+    localStorage.setItem(WATCHLIST_CACHE_KEY, JSON.stringify({
+      savedAt: Date.now(),
+      items: watchlist
+    }));
 
-    localStorage.setItem(WATCHLIST_CACHE_KEY, JSON.stringify({ items: watchlist }));
-    setStatus(`Success: ${watchlist.length} movies loaded.`);
-  } catch (e) { setStatus("Error parsing CSV", true); }
+    setStatus(`Loaded ${watchlist.length} movies from watchlist.csv.`);
+    hideResult();
+  } catch (e) {
+    setStatus(e.message || "Error parsing CSV.", true);
+  }
 });
 
 elClearCache.addEventListener("click", () => {
-  localStorage.clear();
-  location.reload();
+  localStorage.removeItem(WATCHLIST_CACHE_KEY);
+  localStorage.removeItem(GENRE_CACHE_KEY);
+  // keep TMDb key so you don't have to retype it:
+  // localStorage.removeItem(TMDB_KEY_CACHE_KEY);
+
+  watchlist = [];
+  genreMap = { idToName: {}, nameToId: {} };
+  elGenreSelect.innerHTML = "";
+  hideResult();
+  setStatus("Cache cleared. Upload watchlist.csv again.");
 });
 
 /***********************
- * LOGIC & RENDERING
+ * RENDER RESULT
  ***********************/
 function renderPick(tm, opts = {}) {
   const poster = tm.poster_path ? `https://image.tmdb.org/t/p/w500${tm.poster_path}` : "";
+  const year = (tm.release_date || "").slice(0,4);
   const genres = (tm.genre_ids || []).map(id => genreMap.idToName[id]).filter(Boolean);
-  
-  // Create the main result HTML
-  let html = `
-    ${opts.seed ? `<p class="muted"><small>Because you liked: <b>${escapeHtml(opts.seed.title)}</b></small></p>` : ""}
-    <div style="display:flex; gap:15px; flex-wrap:wrap; margin-bottom: 20px;">
-      ${poster ? `<img src="${poster}" style="width:140px; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1);">` : ""}
+
+  showResult(`
+    ${opts.seed ? `<p class="muted"><small>Because you liked: <b>${escapeHtml(opts.seed.title)}</b> ${opts.seed.release_date ? `(${escapeHtml((opts.seed.release_date||"").slice(0,4))})` : ""}</small></p>` : ""}
+    <div style="display:flex; gap:15px; flex-wrap:wrap;">
+      ${poster ? `<img src="${poster}" alt="" style="width:140px; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1);">` : ""}
       <div style="flex:1; min-width:260px;">
-        <h3 style="margin:0;">${escapeHtml(tm.title)} <span class="muted">(${(tm.release_date||"").slice(0,4)})</span></h3>
-        <div style="margin:10px 0;">${genres.map(g => `<span class="pill">${escapeHtml(g)}</span>`).join("")}</div>
+        <h3 style="margin:0;">${escapeHtml(tm.title || "Untitled")} ${year ? `<span class="muted">(${escapeHtml(year)})</span>` : ""}</h3>
+        ${genres.length ? `<div style="margin:10px 0;">${genres.map(g => `<span class="pill">${escapeHtml(g)}</span>`).join("")}</div>` : ""}
         <p style="font-size:14px; color:#444;">${escapeHtml(tm.overview || "No overview available.")}</p>
-        <a href="https://www.themoviedb.org/movie/${tm.id}" target="_blank">View on TMDb</a>
-        ${opts.lbUrl ? ` | <a href="${opts.lbUrl}" target="_blank">View on Letterboxd</a>` : ""}
+        <a href="https://www.themoviedb.org/movie/${tm.id}" target="_blank" rel="noopener">View on TMDb</a>
+        ${opts.lbUrl ? ` | <a href="${opts.lbUrl}" target="_blank" rel="noopener">View on Letterboxd</a>` : ""}
       </div>
     </div>
-  `;
-
-  // If there are extra options, append them underneath
-  if (opts.others && opts.others.length > 0) {
-    html += `<div style="border-top: 1px solid #eee; padding-top: 15px;">
-              <b class="muted" style="font-size: 13px; text-transform: uppercase;">Other Options</b>
-              <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; margin-top: 10px;">`;
-    
-    opts.others.forEach(movie => {
-      const sPoster = movie.tm.poster_path ? `https://image.tmdb.org/t/p/w200${movie.tm.poster_path}` : "";
-      html += `
-        <div style="display: flex; gap: 10px; align-items: center; background: #fff; padding: 8px; border-radius: 8px; border: 1px solid #eee;">
-          ${sPoster ? `<img src="${sPoster}" style="width: 50px; border-radius: 4px;">` : ""}
-          <div style="font-size: 13px;">
-            <div style="font-weight: bold; line-height: 1.2;">${escapeHtml(movie.tm.title)}</div>
-            <div class="muted">${(movie.tm.release_date||"").slice(0,4)}</div>
-            <a href="https://www.themoviedb.org/movie/${movie.tm.id}" target="_blank" style="font-size: 11px;">TMDb</a>
-          </div>
-        </div>
-      `;
-    });
-    html += `</div></div>`;
-  }
-
-  showResult(html);
+  `);
 }
 
-elRecommendBtn.addEventListener("click", async () => {
-  const btnText = elRecommendBtn.textContent;
-  try {
-    elRecommendBtn.disabled = true; elRecommendBtn.textContent = "Searching...";
-    hideResult();
-    
-    if (elApiKey.value) localStorage.setItem(TMDB_KEY_CACHE_KEY, elApiKey.value.trim());
-    if (!Object.keys(genreMap.idToName).length) await loadGenreMap();
-
-// 1. RANDOM PICK LOGIC
-    if (activeTab === "random") {
-      if (!watchlist.length) throw new Error("Upload watchlist first.");
-      const picks = [];
-      for(let i=0; i<4; i++) picks.push(pickRandom(watchlist));
-      
-      const results = await Promise.all(picks.map(p => tmdbGet("search/movie", { query: p.titleGuess, year: p.yearGuess })));
-      const valid = results.map((s, i) => ({ tm: s.results[0], lbUrl: picks[i].lbUrl })).filter(r => r.tm);
-
-      renderPick(valid[0].tm, { lbUrl: valid[0].lbUrl, others: valid.slice(1) });
-    } 
-
-    // 2. GENRE FILTER LOGIC
-    else if (activeTab === "genre") {
-      const gid = Number(elGenreSelect.value);
-      const shuffled = [...watchlist].sort(() => 0.5 - Math.random());
-      const matches = [];
-      
-      for (let i = 0; i < shuffled.length && matches.length < 4; i++) {
-        setStatus(`Searching watchlist... Found ${matches.length}/4 matches`);
-        const s = await tmdbGet("search/movie", { query: shuffled[i].titleGuess, year: shuffled[i].yearGuess });
-        if (s.results[0]?.genre_ids.includes(gid)) {
-          matches.push({ tm: s.results[0], lbUrl: shuffled[i].lbUrl });
-        }
-        await sleep(150);
-      }
-      
-      if (!matches.length) throw new Error("No match found in this sample.");
-      renderPick(matches[0].tm, { lbUrl: matches[0].lbUrl, others: matches.slice(1) });
-    }
-
-    // 3. SIMILAR MOVIE LOGIC
-    else if (activeTab.startsWith("similar")) {
-      const isWatchlist = activeTab === "similar_watchlist";
-      const titleInput = isWatchlist ? "seedTitle2" : "seedTitle";
-      const title = document.getElementById(titleInput).value;
-      if (!title) throw new Error("Enter a seed movie title.");
-
-      const seedSearch = await tmdbGet("search/movie", { query: title });
-      const seed = seedSearch.results[0];
-      const similarData = await tmdbGet(`movie/${seed.id}/similar`);
-      const similars = similarData.results;
-
-      if (isWatchlist) {
-        const wlMap = new Map(watchlist.map(w => [normalizeTitle(w.titleGuess), w]));
-        const matches = similars.filter(s => wlMap.has(normalizeTitle(s.title)))
-                                .map(s => ({ tm: s, lbUrl: wlMap.get(normalizeTitle(s.title)).lbUrl }));
-        
-        if (!matches.length) throw new Error("No similar movies found on watchlist.");
-        renderPick(matches[0].tm, { seed, lbUrl: matches[0].lbUrl, others: matches.slice(1, 4) });
-      } else {
-        const formatted = similars.slice(0, 4).map(s => ({ tm: s }));
-        renderPick(formatted[0].tm, { seed, others: formatted.slice(1) });
-      }
-    }
-    }
-    setStatus("Done.");
-  } catch (e) { setStatus(e.message, true); }
-  finally { elRecommendBtn.disabled = false; elRecommendBtn.textContent = btnText; }
-});
-
-// Tab switching
+/***********************
+ * TAB SWITCHING
+ ***********************/
 document.getElementById("tabs").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-tab]");
   if (!btn) return;
+
   activeTab = btn.dataset.tab;
+
   document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
   btn.classList.add("active");
-  Object.entries(panels).forEach(([k, el]) => el.style.display = (k === activeTab) ? "block" : "none");
+
+  Object.entries(panels).forEach(([k, el]) => {
+    el.style.display = (k === activeTab) ? "block" : "none";
+  });
+
+  hideResult();
+  setStatus("");
 });
 
-// Initialization
+/***********************
+ * RECOMMEND BUTTON
+ ***********************/
+elRecommendBtn.addEventListener("click", async () => {
+  const originalText = elRecommendBtn.textContent;
+
+  try {
+    elRecommendBtn.disabled = true;
+    elRecommendBtn.textContent = "Searching…";
+    hideResult();
+
+    // Save key if user typed it
+    const typedKey = elApiKey.value.trim();
+    if (typedKey) localStorage.setItem(TMDB_KEY_CACHE_KEY, typedKey);
+
+    requireTmdbKey();
+
+    // ensure genres available for pills
+    if (!Object.keys(genreMap.idToName).length) await loadGenreMap();
+
+    if (activeTab === "random") {
+      ensureWatchlistLoaded();
+      setStatus("Picking random from your watchlist…");
+      const pick = pickRandom(watchlist);
+      const tm = await tmdbSearchMovie(pick.titleGuess, pick.yearGuess);
+      renderPick(tm, { lbUrl: pick.lbUrl });
+      setStatus("Done.");
+      return;
+    }
+
+    if (activeTab === "genre") {
+      ensureWatchlistLoaded();
+      const gid = Number(elGenreSelect.value);
+      const gName = genreMap.idToName[gid] || "that genre";
+
+      const shuffled = [...watchlist].sort(() => 0.5 - Math.random());
+      const limit = Math.min(50, shuffled.length);
+
+      for (let i = 0; i < limit; i++) {
+        const item = shuffled[i];
+        setStatus(`Scanning (${i+1}/${limit}): ${item.titleGuess}…`);
+
+        try {
+          const s = await tmdbSearchMovie(item.titleGuess, item.yearGuess);
+          if ((s.genre_ids || []).includes(gid)) {
+            renderPick(s, { lbUrl: item.lbUrl });
+            setStatus(`Match found (${gName}).`);
+            return;
+          }
+        } catch {
+          // ignore mismatches
+        }
+
+        await sleep(140);
+      }
+
+      throw new Error(`No ${gName} match found in this sample. Click Recommend again to try a new sample.`);
+    }
+
+    if (activeTab === "similar_any" || activeTab === "similar_watchlist") {
+      const isWatchlist = activeTab === "similar_watchlist";
+
+      const title = (document.getElementById(isWatchlist ? "seedTitle2" : "seedTitle").value || "").trim();
+      const year  = (document.getElementById(isWatchlist ? "seedYear2"  : "seedYear").value  || "").trim();
+
+      if (!title) throw new Error("Enter a seed movie title.");
+
+      setStatus("Searching seed movie…");
+      const seed = await tmdbSearchMovie(title, year);
+
+      setStatus(`Getting similar movies to "${seed.title}"…`);
+      const similars = await tmdbSimilar(seed.id);
+      if (!similars.length) throw new Error("TMDb returned no similar movies for that title.");
+
+      if (!isWatchlist) {
+        renderPick(pickRandom(similars), { seed });
+        setStatus("Done.");
+        return;
+      }
+
+      ensureWatchlistLoaded();
+
+      const wlMap = new Map(watchlist.map(w => [normalizeTitle(w.titleGuess), w]));
+      const matches = similars.filter(s => wlMap.has(normalizeTitle(s.title)));
+
+      if (!matches.length) throw new Error("No similar movies found on your watchlist. Try a different seed title.");
+
+      const pick = pickRandom(matches);
+      const wl = wlMap.get(normalizeTitle(pick.title));
+      renderPick(pick, { seed, lbUrl: wl?.lbUrl || null });
+      setStatus("Done.");
+      return;
+    }
+
+    setStatus("Done.");
+  } catch (e) {
+    setStatus(e?.message || "Something went wrong.", true);
+  } finally {
+    elRecommendBtn.disabled = false;
+    elRecommendBtn.textContent = originalText;
+  }
+});
+
+/***********************
+ * INIT
+ ***********************/
 (function init() {
-  const cachedKey = localStorage.getItem(TMDB_KEY_CACHE_KEY);
-  if (cachedKey) { elApiKey.value = cachedKey; loadGenreMap(); }
-  const raw = localStorage.getItem(WATCHLIST_CACHE_KEY);
-  if (raw) { watchlist = JSON.parse(raw).items; setStatus(`Ready: ${watchlist.length} movies cached.`); }
+  try {
+    const cachedKey = localStorage.getItem(TMDB_KEY_CACHE_KEY);
+    if (cachedKey && !elApiKey.value) elApiKey.value = cachedKey;
+
+    const raw = localStorage.getItem(WATCHLIST_CACHE_KEY);
+    if (raw) {
+      const data = JSON.parse(raw);
+      if (Array.isArray(data?.items) && data.items.length) {
+        watchlist = data.items;
+        setStatus(`Ready: ${watchlist.length} watchlist movies cached. Paste TMDb key (if needed) and hit Recommend.`);
+      } else {
+        setStatus("Upload watchlist.csv, paste your TMDb key, then hit Recommend.");
+      }
+    } else {
+      setStatus("Upload watchlist.csv, paste your TMDb key, then hit Recommend.");
+    }
+
+    // If key exists, pre-load genres
+    if (getTmdbKey()) loadGenreMap().catch(()=>{});
+  } catch {
+    setStatus("Upload watchlist.csv, paste your TMDb key, then hit Recommend.");
+  }
 })();
 </script>
 </body>
