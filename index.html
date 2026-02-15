@@ -382,13 +382,24 @@ async function loadGenreMap() {
 }
 
 function populateGenreSelect() {
+  const previousValue = elGenreSelect.value; // save selected genre
+
   elGenreSelect.innerHTML = "";
+
   const names = Object.values(genreMap.idToName).sort((a,b) => a.localeCompare(b));
   names.forEach(name => {
     const opt = document.createElement("option");
     opt.value = String(genreMap.nameToId[name.toLowerCase()]);
     opt.textContent = name;
     elGenreSelect.appendChild(opt);
+  });
+
+  // restore previous selection if it exists
+  if (previousValue) {
+    elGenreSelect.value = previousValue;
+  }
+}
+
   });
 }
 
