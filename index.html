@@ -33,7 +33,7 @@
   <div class="card">
     <h2>🍿 Watchlist Recommender</h2>
     <p class="muted">
-      Upload your <span class="mono">watchlist.csv</span> from Letterboxd export once (it’s saved in your browser),
+      Upload your <span class="mono">watchlist.csv</span> from a Letterboxd export once (it’s saved in your browser),
       then use TMDb for genres + similar-movie recommendations.
     </p>
 
@@ -133,11 +133,11 @@
 
 <script>
 /***********************
- * 0) QUICK SETUP
+ * 0) OPTIONAL HARDCODE
  ***********************/
-// If you want, you can hardcode your key here instead of typing it each time:
-// const HARDCODED_TMDB_KEY = "PASTE_KEY_HERE";
-const HARDCODED_TMDB_KEY = "dfd9647132166a17dd65392ce90929d2";
+// Don't hardcode your TMDb key if you're going to host this publicly.
+// Leave blank and paste it into the UI; it will be saved in localStorage.
+const HARDCODED_TMDB_KEY = "";
 
 /***********************
  * 1) STATE + UI
@@ -165,40 +165,64 @@ const panels = {
 };
 let activeTab = "random";
 
-// Watchlist items: { titleGuess, yearGuess, lbUrl }
+// watchlist: { titleGuess, yearGuess, lbUrl }
 let watchlist = [];
-
-// TMDb genre map: id->name, name->id
+// genreMap: { idToName: {id: name}, nameToId: {nameLower: id} }
 let genreMap = { idToName: {}, nameToId: {} };
 
-// storage keys
-const WATCHLIST_CACHE_KEY = "lb_watchlist_csv_cache_v2";
-const TMDB_KEY_CACHE_KEY = "tmdb_key_cache_v1";
-const GENRE_CACHE_KEY = "tmdb_genres_cache_v1";
+// localStorage keys
+const WATCHLIST_CACHE_KEY = "lb_watchlist_csv_cache_v3";
+const TMDB_KEY_CACHE_KEY   = "tmdb_key_cache_v2";
+const GENRE_CACHE_KEY      = "tmdb_genres_cache_v2";
 
 /***********************
  * 2) UTIL
  ***********************/
-function setStatus(msg, isError=false) {
-  elStatus.innerHTML = isError ? `<span class="danger">${escapeHtml(msg)}</span>` : escapeHtml(msg);
-}
-function showResult(html) {
-  elResult.style.display = "block";
-  elResult.innerHTML = html;
-}
-function hideResult() {
-  elResult.style.display = "none";
-  elResult.innerHTML = "";
-}
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
     "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
   }[c]));
 }
+
+function setStatus(msg, isError=false) {
+  elStatus.innerHTML = isError
+    ? `<span class="danger">${escapeHtml(msg)}</span>`
+    : escapeHtml(msg);
+}
+
+function showResult(html) {
+  elResult.style.display = "block";
+  elResult.innerHTML = html;
+}
+
+function hideResult() {
+  elResult.style.display = "none";
+  elResult.innerHTML = "";
+}
+
 function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
-function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+function ensureWatchlistLoaded() {
+  if (!Array.isArray(watchlist) || watchlist.length === 0) {
+    throw new Error("Upload watchlist.csv first.");
+  }
+}
+
+function normalizeTitle(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[’']/g, "")
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 /***********************
  * 3) TABS
@@ -215,36 +239,50 @@ document.getElementById("tabs").addEventListener("click", (e) => {
   Object.entries(panels).forEach(([k, el]) => {
     el.style.display = (k === activeTab) ? "block" : "none";
   });
+
   hideResult();
 });
 
 /***********************
- * 4) CSV PARSING (watchlist.csv)
+ * 4) CSV PARSING (Letterboxd watchlist.csv)
  ***********************/
 function parseCSV(text) {
-  // Handles commas inside quotes and escaped quotes
+  // Handles commas inside quotes + escaped quotes ("")
   const rows = [];
-  let row = [], cur = "", inQuotes = false;
+  let row = [];
+  let cur = "";
+  let inQuotes = false;
 
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
-    const next = text[i+1];
+    const next = text[i + 1];
 
     if (c === '"' && next === '"') { cur += '"'; i++; continue; }
     if (c === '"') { inQuotes = !inQuotes; continue; }
 
-    if (!inQuotes && c === ",") { row.push(cur); cur = ""; continue; }
+    if (!inQuotes && c === ",") {
+      row.push(cur);
+      cur = "";
+      continue;
+    }
 
     if (!inQuotes && (c === "\n" || c === "\r")) {
-      if (c === "\r" && next === "\n") i++;
-      row.push(cur); cur = "";
-      if (row.some(cell => cell.trim() !== "")) rows.push(row);
+      if (c === "\r" && next === "\n") i++; // CRLF
+      row.push(cur);
+      cur = "";
+      if (row.some(cell => String(cell).trim() !== "")) rows.push(row);
       row = [];
       continue;
     }
+
     cur += c;
   }
-  if (cur.length || row.length) { row.push(cur); rows.push(row); }
+
+  if (cur.length || row.length) {
+    row.push(cur);
+    if (row.some(cell => String(cell).trim() !== "")) rows.push(row);
+  }
+
   return rows;
 }
 
@@ -252,23 +290,25 @@ function watchlistFromCSV(csvText) {
   const rows = parseCSV(csvText);
   if (rows.length < 2) throw new Error("CSV looks empty.");
 
-  const headers = rows[0].map(h => h.trim().toLowerCase());
+  const headers = rows[0].map(h => String(h).trim().toLowerCase());
+
+  // Letterboxd export headers usually include: Name, Year, Letterboxd URI
   const idxName = headers.indexOf("name");
   const idxYear = headers.indexOf("year");
-  const idxUri = headers.findIndex(h => h.includes("letterboxd uri"));
+  const idxUri  = headers.findIndex(h => h.includes("letterboxd uri"));
 
   if (idxName === -1) {
-    throw new Error("Couldn’t find a 'Name' column. Make sure you uploaded Letterboxd watchlist.csv (from export ZIP).");
+    throw new Error("Couldn’t find a 'Name' column. Make sure this is Letterboxd watchlist.csv (from export ZIP).");
   }
 
   const items = [];
   for (let i = 1; i < rows.length; i++) {
-    const r = rows[i];
-    const name = (r[idxName] || "").trim();
+    const r = rows[i] || [];
+    const name = String(r[idxName] || "").trim();
     if (!name) continue;
 
-    const year = idxYear !== -1 ? (r[idxYear] || "").trim() : "";
-    const lbUrl = idxUri !== -1 ? (r[idxUri] || "").trim() : "";
+    const year = idxYear !== -1 ? String(r[idxYear] || "").trim() : "";
+    const lbUrl = idxUri !== -1 ? String(r[idxUri] || "").trim() : "";
 
     items.push({
       titleGuess: name,
@@ -279,12 +319,6 @@ function watchlistFromCSV(csvText) {
 
   if (!items.length) throw new Error("No movies parsed from CSV.");
   return items;
-}
-
-function ensureWatchlistLoaded() {
-  if (!watchlist || watchlist.length === 0) {
-    throw new Error("Upload watchlist.csv first.");
-  }
 }
 
 elCsvFile.addEventListener("change", async () => {
@@ -319,7 +353,6 @@ elClearCache.addEventListener("click", () => {
  * 5) TMDb API
  ***********************/
 function getTmdbKey() {
-  // Priority: typed input -> saved cache -> hardcoded constant
   const typed = elApiKey.value.trim();
   if (typed) return typed;
 
@@ -333,7 +366,7 @@ function getTmdbKey() {
 
 function requireTmdbKey() {
   const k = getTmdbKey();
-  if (!k) throw new Error("TMDb key missing. Paste your v3 API key in the TMDb field at the top.");
+  if (!k) throw new Error("TMDb key missing. Paste your v3 API key at the top.");
   return k;
 }
 
@@ -341,20 +374,23 @@ async function tmdbGet(path, params = {}) {
   const key = requireTmdbKey();
   const url = new URL(`https://api.themoviedb.org/3/${path}`);
   url.searchParams.set("api_key", key);
-  Object.entries(params).forEach(([k,v]) => {
-    if (v !== undefined && v !== null && String(v).trim() !== "") url.searchParams.set(k, v);
-  });
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && String(v).trim() !== "") {
+      url.searchParams.set(k, v);
+    }
+  }
 
   const res = await fetch(url.toString());
   if (!res.ok) {
-    const txt = await res.text().catch(()=> "");
-    throw new Error(`TMDb error ${res.status}${txt ? `: ${txt.slice(0,120)}` : ""}`);
+    let txt = "";
+    try { txt = await res.text(); } catch {}
+    throw new Error(`TMDb error ${res.status}${txt ? `: ${txt.slice(0, 140)}` : ""}`);
   }
   return await res.json();
 }
 
 async function loadGenreMap() {
-  // if cached, use it
+  // Try cache first
   const raw = localStorage.getItem(GENRE_CACHE_KEY);
   if (raw) {
     try {
@@ -369,11 +405,12 @@ async function loadGenreMap() {
 
   setStatus("Loading TMDb genres…");
   const data = await tmdbGet("genre/movie/list", { language: "en-US" });
+
   const idToName = {};
   const nameToId = {};
   (data.genres || []).forEach(g => {
     idToName[g.id] = g.name;
-    nameToId[g.name.toLowerCase()] = g.id;
+    nameToId[String(g.name).toLowerCase()] = g.id;
   });
 
   genreMap = { idToName, nameToId };
@@ -382,25 +419,19 @@ async function loadGenreMap() {
 }
 
 function populateGenreSelect() {
-  const previousValue = elGenreSelect.value; // save selected genre
+  const previousValue = elGenreSelect.value;
 
   elGenreSelect.innerHTML = "";
 
-  const names = Object.values(genreMap.idToName).sort((a,b) => a.localeCompare(b));
-  names.forEach(name => {
+  const names = Object.values(genreMap.idToName).sort((a, b) => a.localeCompare(b));
+  for (const name of names) {
     const opt = document.createElement("option");
-    opt.value = String(genreMap.nameToId[name.toLowerCase()]);
+    opt.value = String(genreMap.nameToId[String(name).toLowerCase()]);
     opt.textContent = name;
     elGenreSelect.appendChild(opt);
-  });
-
-  // restore previous selection if it exists
-  if (previousValue) {
-    elGenreSelect.value = previousValue;
   }
-}
 
-  });
+  if (previousValue) elGenreSelect.value = previousValue;
 }
 
 async function tmdbSearchMovie(title, yearOptional) {
@@ -410,15 +441,36 @@ async function tmdbSearchMovie(title, yearOptional) {
     include_adult: "false",
     language: "en-US"
   });
+
   const best = (data.results || [])[0];
   if (!best) throw new Error(`No TMDb results for "${title}". Try adding the year.`);
   return best;
 }
 
+async function tmdbMovieDetails(movieId) {
+  // Gives richer fields than search: genres[], imdb_id, etc.
+  return await tmdbGet(`movie/${movieId}`, { language: "en-US" });
+}
+
 async function tmdbSimilar(movieId, maxCount) {
-  const data = await tmdbGet(`movie/${movieId}/similar`, { language: "en-US", page: 1 });
-  const results = data.results || [];
-  return results.slice(0, maxCount);
+  // Pull multiple pages if needed
+  const want = Number(maxCount);
+  const out = [];
+  let page = 1;
+
+  while (out.length < want) {
+    const data = await tmdbGet(`movie/${movieId}/similar`, { language: "en-US", page });
+    const results = data.results || [];
+    if (!results.length) break;
+
+    out.push(...results);
+    if (page >= (data.total_pages || 1)) break;
+    page++;
+    // gentle pacing
+    await sleep(80);
+  }
+
+  return out.slice(0, want);
 }
 
 function tmdbPosterUrl(path) {
@@ -427,16 +479,19 @@ function tmdbPosterUrl(path) {
 }
 
 /***********************
- * 6) RECOMMENDERS
+ * 6) RENDER
  ***********************/
 function renderPick(tm, opts = {}) {
   const poster = tmdbPosterUrl(tm.poster_path);
-  const year = (tm.release_date || "").slice(0,4);
+  const year = (tm.release_date || "").slice(0, 4);
 
-  // tm can be from search (has genre_ids) or from /similar (also genre_ids)
-  const genres = (tm.genre_ids || [])
-    .map(id => genreMap.idToName[id])
-    .filter(Boolean);
+  // tm may come from search/similar; use genre_ids when present, else map tm.genres
+  let genres = [];
+  if (Array.isArray(tm.genre_ids) && tm.genre_ids.length) {
+    genres = tm.genre_ids.map(id => genreMap.idToName[id]).filter(Boolean);
+  } else if (Array.isArray(tm.genres) && tm.genres.length) {
+    genres = tm.genres.map(g => g?.name).filter(Boolean);
+  }
 
   const lbLink = opts.lbUrl
     ? `<p><a href="${opts.lbUrl}" target="_blank" rel="noopener">Open on Letterboxd</a></p>`
@@ -445,7 +500,7 @@ function renderPick(tm, opts = {}) {
   const tmdbLink = tm.id ? `https://www.themoviedb.org/movie/${tm.id}` : null;
 
   const seedLine = opts.seed
-    ? `<p class="muted"><small>Similar to: <span class="mono">${escapeHtml(opts.seed.title)} (${(opts.seed.release_date||"").slice(0,4)})</span></small></p>`
+    ? `<p class="muted"><small>Similar to: <span class="mono">${escapeHtml(opts.seed.title)} (${escapeHtml((opts.seed.release_date || "").slice(0, 4))})</span></small></p>`
     : "";
 
   showResult(`
@@ -463,6 +518,9 @@ function renderPick(tm, opts = {}) {
   `);
 }
 
+/***********************
+ * 7) RECOMMENDERS
+ ***********************/
 async function recommendRandomFromWatchlist() {
   ensureWatchlistLoaded();
 
@@ -472,36 +530,43 @@ async function recommendRandomFromWatchlist() {
   setStatus(`Looking up "${pick.titleGuess}" on TMDb…`);
   const tm = await tmdbSearchMovie(pick.titleGuess, pick.yearGuess);
 
-  renderPick(tm, { lbUrl: pick.lbUrl });
+  // optional: get details for better genre list
+  let details = null;
+  try { details = await tmdbMovieDetails(tm.id); } catch {}
+  renderPick(details || tm, { lbUrl: pick.lbUrl });
+
   setStatus("Done.");
 }
 
 async function recommendWatchlistByGenre(genreIdStr) {
   ensureWatchlistLoaded();
   const genreId = Number(genreIdStr);
-
-  // We don't want to search every watchlist item; we sample a chunk.
-  const shuffled = watchlist.slice().sort(() => Math.random() - 0.5);
-  const MAX_CHECKS = Math.min(40, shuffled.length);
-
   const gName = genreMap.idToName[genreId] || "that genre";
+
+  // sample rather than scan entire watchlist
+  const shuffled = watchlist.slice().sort(() => Math.random() - 0.5);
+  const MAX_CHECKS = Math.min(50, shuffled.length);
+
   setStatus(`Searching your watchlist for ${gName}…`);
 
   for (let i = 0; i < MAX_CHECKS; i++) {
     const item = shuffled[i];
-    setStatus(`Checking ${i+1}/${MAX_CHECKS}: ${item.titleGuess}`);
+    setStatus(`Checking ${i + 1}/${MAX_CHECKS}: ${item.titleGuess}`);
 
     try {
       const tm = await tmdbSearchMovie(item.titleGuess, item.yearGuess);
       if ((tm.genre_ids || []).includes(genreId)) {
-        renderPick(tm, { lbUrl: item.lbUrl });
+        let details = null;
+        try { details = await tmdbMovieDetails(tm.id); } catch {}
+        renderPick(details || tm, { lbUrl: item.lbUrl });
         setStatus(`Done. (${gName})`);
         return;
       }
     } catch {
-      // ignore mismatches
+      // ignore mismatches/failed searches
     }
-    await sleep(120); // polite pacing
+
+    await sleep(120);
   }
 
   throw new Error(`Couldn’t find a ${gName} match in this sample. Click Recommend again to try a different sample.`);
@@ -520,15 +585,6 @@ async function recommendSimilarAny(seedTitle, seedYear, poolSize) {
   setStatus("Done.");
 }
 
-function normalizeTitle(s) {
-  return String(s || "")
-    .toLowerCase()
-    .replace(/[’']/g, "")     // quotes
-    .replace(/[^a-z0-9 ]/g, " ") // punctuation
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 async function recommendSimilarOnWatchlist(seedTitle, seedYear, poolSize) {
   ensureWatchlistLoaded();
 
@@ -539,7 +595,7 @@ async function recommendSimilarOnWatchlist(seedTitle, seedYear, poolSize) {
   const similars = await tmdbSimilar(seed.id, Number(poolSize));
   if (!similars.length) throw new Error("TMDb returned no similar movies for that title.");
 
-  // create lookup for watchlist by normalized title
+  // build lookup from watchlist
   const wlMap = new Map();
   for (const w of watchlist) wlMap.set(normalizeTitle(w.titleGuess), w);
 
@@ -560,20 +616,20 @@ async function recommendSimilarOnWatchlist(seedTitle, seedYear, poolSize) {
 }
 
 /***********************
- * 7) MAIN BUTTON
+ * 8) MAIN BUTTON
  ***********************/
 elRecommendBtn.addEventListener("click", async () => {
   try {
     hideResult();
 
-    // save key if user typed it
+    // save typed key
     const typed = elApiKey.value.trim();
     if (typed) localStorage.setItem(TMDB_KEY_CACHE_KEY, typed);
 
-    // need TMDb key for all modes (genres + similar + poster/overview)
+    // ensure key exists
     requireTmdbKey();
 
-    // load genres once we have key
+    // load genres (needed for pills)
     await loadGenreMap();
 
     if (activeTab === "random") {
@@ -595,21 +651,19 @@ elRecommendBtn.addEventListener("click", async () => {
 });
 
 /***********************
- * 8) INIT: restore key + watchlist cache
+ * 9) INIT: restore cache
  ***********************/
 (function init() {
   try {
-    // restore key
     const cachedKey = localStorage.getItem(TMDB_KEY_CACHE_KEY);
     if (cachedKey && !elApiKey.value) elApiKey.value = cachedKey;
 
-    // restore watchlist
     const raw = localStorage.getItem(WATCHLIST_CACHE_KEY);
     if (raw) {
       const data = JSON.parse(raw);
       if (Array.isArray(data?.items) && data.items.length) {
         watchlist = data.items;
-        setStatus(`Loaded ${watchlist.length} films from saved watchlist.csv cache. Paste TMDb key (if needed) and hit Recommend.`);
+        setStatus(`Loaded ${watchlist.length} films from saved watchlist cache. Paste TMDb key (if needed) and hit Recommend.`);
         return;
       }
     }
